@@ -20,7 +20,8 @@ import lombok.Value;
 import org.openrewrite.*;
 import org.openrewrite.groovy.GroovyIsoVisitor;
 import org.openrewrite.java.tree.J;
-import org.openrewrite.properties.ChangePropertyValue;
+import org.openrewrite.properties.PropertiesIsoVisitor;
+import org.openrewrite.properties.tree.Properties;
 
 import java.util.regex.Pattern;
 
@@ -63,7 +64,14 @@ public class MinecraftVersionMigration extends Recipe {
                             if (containsMinecraftVersion(value)) {
                                 String updatedValue = value.replace(currentVersion, targetVersion);
                                 if (!updatedValue.equals(value)) {
-                                    return l.withValue(updatedValue).withValueSource("\"" + updatedValue + "\"");
+                                    // Preserve the original quote style from the source
+                                    String valueSource = l.getValueSource();
+                                    if (valueSource != null) {
+                                        char quoteChar = valueSource.charAt(0);
+                                        return l.withValue(updatedValue).withValueSource(quoteChar + updatedValue + quoteChar);
+                                    } else {
+                                        return l.withValue(updatedValue).withValueSource("\"" + updatedValue + "\"");
+                                    }
                                 }
                             }
                         }
@@ -71,31 +79,50 @@ public class MinecraftVersionMigration extends Recipe {
                     }
                 }
             ),
-            // Handle gradle.properties files - basic version properties
+            // Handle gradle.properties files
             Preconditions.check(
                 new FindSourceFiles("**/gradle.properties"),
-                new ChangePropertyValue("minecraft_version", targetVersion, null, null, null).getVisitor()
-            ),
-            // Handle more gradle.properties patterns
-            Preconditions.check(
-                new FindSourceFiles("**/gradle.properties"),
-                new ChangePropertyValue("mc_version", targetVersion, null, null, null).getVisitor()
+                new PropertiesIsoVisitor<ExecutionContext>() {
+                    @Override
+                    public Properties.Entry visitEntry(Properties.Entry entry, ExecutionContext ctx) {
+                        Properties.Entry e = super.visitEntry(entry, ctx);
+                        if (e.getValue() instanceof Properties.Value) {
+                            Properties.Value value = (Properties.Value) e.getValue();
+                            if (value.getText() != null && value.getText().contains(currentVersion)) {
+                                String updatedValue = value.getText().replace(currentVersion, targetVersion);
+                                if (!updatedValue.equals(value.getText())) {
+                                    return e.withValue(value.withText(updatedValue));
+                                }
+                            }
+                        }
+                        return e;
+                    }
+                }
             )
         );
     }
 
     private boolean containsMinecraftVersion(String value) {
-        // Check if the string contains version patterns commonly used in Minecraft projects
-        return value.contains(currentVersion) && (
-            value.toLowerCase().contains("minecraft") || 
-            value.toLowerCase().contains("forge") ||
-            value.toLowerCase().contains("neoforge") ||
-            value.toLowerCase().contains("fabric") ||
-            value.toLowerCase().contains("quilt") ||
-            // Version patterns like "net.minecraft:server:1.20.1"
-            Pattern.compile("net\\.minecraft[\\w.]*:" + Pattern.quote(currentVersion)).matcher(value).find() ||
-            // Version patterns in dependency strings
-            Pattern.compile(":['\"]?" + Pattern.quote(currentVersion) + "['\"]?").matcher(value).find()
-        );
+        // Check if the string contains the current version
+        if (!value.contains(currentVersion)) {
+            return false;
+        }
+        
+        // For simple cases like "1.20.1" assignments, always allow
+        if (value.equals(currentVersion)) {
+            return true;
+        }
+        
+        // For strings that might contain the version, check common patterns
+        return value.toLowerCase().contains("minecraft") || 
+               value.toLowerCase().contains("forge") ||
+               value.toLowerCase().contains("neoforge") ||
+               value.toLowerCase().contains("fabric") ||
+               value.toLowerCase().contains("quilt") ||
+               value.toLowerCase().contains("official") ||  // mappings
+               // Version patterns like "net.minecraft:server:1.20.1"
+               Pattern.compile("net\\.minecraft[\\w.]*:" + Pattern.quote(currentVersion)).matcher(value).find() ||
+               // Version patterns in dependency strings
+               Pattern.compile(":['\"]?" + Pattern.quote(currentVersion) + "['\"]?").matcher(value).find();
     }
 }
